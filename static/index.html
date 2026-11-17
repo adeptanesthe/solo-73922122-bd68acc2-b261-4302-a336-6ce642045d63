@@ -139,6 +139,7 @@
         <h3>② 推测解码（KV 缓存）</h3>
         <div class="metric"><span>目标前向次数</span><b id="sFwd2">-</b></div>
         <div class="metric"><span>草稿前向次数</span><b id="dFwd2">-</b></div>
+        <div class="metric"><span>累计接受草稿 token</span><b id="sAccepted">-</b></div>
         <div class="metric"><span>EOS 截断</span><b id="sEos">-</b></div>
         <div class="tokens" id="sTokens"></div>
         <div class="out-text" id="sText"></div>
@@ -152,10 +153,16 @@
           <tr>
             <th>轮次</th><th>草稿块</th><th>目标预测</th><th>接受数</th>
             <th>判定</th><th>本轮确认 token</th><th>目标前向输入长度</th>
+            <th>目标前向</th><th>草稿前向</th><th>草稿缓存</th><th>目标缓存</th>
           </tr>
         </thead>
         <tbody id="roundBody"></tbody>
       </table>
+      <p style="color:var(--muted);font-size:12px;margin:10px 0 0">
+        每轮目标前向恒为 1 次（输入长度 = 本轮实际喂给目标的新 token 数，不含已缓存前缀）；
+        草稿前向含本轮末把确认前缀（含纠正/补词 tail）增量写入草稿缓存的调用；
+        两个缓存列均为本轮结束时的 KV 覆盖长度，应与已确认前缀一致。
+      </p>
     </section>
   </section>
 </main>
@@ -255,6 +262,9 @@ function render(d) {
 
   $("sFwd2").textContent = d.speculative.target_forward_count;
   $("dFwd2").textContent = d.speculative.draft_forward_count;
+  const totalAccepted = d.speculative.rounds.reduce((a, rd) => a + rd.accepted, 0);
+  const totalDraft = d.speculative.rounds.reduce((a, rd) => a + rd.draft_tokens.length, 0);
+  $("sAccepted").textContent = totalAccepted + " / " + totalDraft;
   $("sEos").textContent = d.speculative.stopped_by_eos ? "是" : "否";
   $("sText").textContent = d.speculative.text;
   $("sTokens").innerHTML = "";
@@ -292,6 +302,10 @@ function render(d) {
         return div;
       },
       () => document.createTextNode(rd.target_forward_input_len),
+      () => document.createTextNode(rd.target_forward_calls),
+      () => document.createTextNode(rd.draft_forward_calls),
+      () => document.createTextNode(rd.draft_cache_len_after),
+      () => document.createTextNode(rd.target_cache_len_after),
     ];
     cells.forEach((make) => { const td = document.createElement("td"); td.appendChild(make()); tr.appendChild(td); });
     body.appendChild(tr);

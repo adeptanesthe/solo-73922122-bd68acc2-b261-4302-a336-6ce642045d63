@@ -11,6 +11,8 @@
     因此目标前向次数 == 推测轮数。
   - 草稿模型：KV 缓存对齐到完整确认前缀，其尾位置输出的 logits 即对下一
     token 的预测，首个草稿 token 直接取它，无需重复喂尾 token。
+    拒绝后只保留到"接受前缀末尾"（被拒 token 及其后的草稿位置全部丢弃），
+    再用目标给出的纠正/补词 token 增量补齐；已确认前缀不重算。
 """
 
 from __future__ import annotations
@@ -33,6 +35,10 @@ class RoundTrace:
     decision: str                    # "reject" | "all_accepted"
     target_tokens: list[int]         # 该轮确认的新 token（接受+纠正/补词）
     target_forward_input_len: int    # 该轮目标前向一次吃掉的输入长度
+    target_forward_calls: int        # 该轮实际目标前向次数（恒为 1）
+    draft_forward_calls: int         # 该轮实际草稿前向次数（首轮含提示词预热）
+    draft_cache_len_after: int       # 本轮结束时草稿 KV 覆盖的确认前缀长度
+    target_cache_len_after: int      # 本轮结束时目标 KV 覆盖的已确认位置数
 
 
 @dataclass
@@ -89,6 +95,11 @@ def speculative_decode(draft: CausalTransformer, target: CausalTransformer,
     stopped = False
     # pending：上一轮确认但尚未写入目标 KV 的 tail（首轮为 None）
     pending: int | None = None
+
+    # 逐轮前向次数的统计基准（reset_stats 后均为 0）；首轮草稿计数因此
+    # 包含下面的提示词预热，逐轮相加恰好等于总前向次数。
+    prev_target_calls = target.forward_count
+    prev_draft_calls = draft.forward_count
 
     # 草稿预热提示词前缀（1 次前向），拿到首个草稿 token 的预测 logits。
     # 目标模型不单独预热：首轮把"提示词+草稿块"合并为一次前向。
@@ -169,9 +180,14 @@ def speculative_decode(draft: CausalTransformer, target: CausalTransformer,
         pending = tail if not stopped and len(new_tokens) < max_new else None
 
         # ---- 7. 草稿 KV 对齐到完整确认前缀 ----
-        if draft.cache_len > len(seq):
-            draft.truncate_cache(len(seq))
-        # 草稿可能落后（block 提前遇 EOS），逐 token 增量补齐确认前缀；
+        # 关键：先回滚到"接受前缀末尾"（old_confirmed + accepted），把被拒草稿
+        # token 及其后的草稿位置从草稿缓存中彻底丢弃。若只按 len(seq) 截断，
+        # 部分拒绝时（0 < accepted < len(block)）被拒 token 会恰好留在缓存里，
+        # 下一轮首个草稿 token 就会基于它预测——输出可能碰巧仍与基线一致，
+        # 但草稿本身已偏离确认前缀，接受数与前向次数都会失真。
+        draft.truncate_cache(keep)
+        # 补齐到完整确认前缀（含本轮 tail）。tail 是目标在"接受前缀"上的纠正/
+        # 补词 token；整块接受时还可能是最后一个从未喂入草稿的草稿 token。
         # 最后一次前向的输出即下一轮首个草稿 token 的预测。
         while draft.cache_len < len(seq):
             draft_next_logits = draft.forward(
@@ -185,7 +201,13 @@ def speculative_decode(draft: CausalTransformer, target: CausalTransformer,
             decision=decision,
             target_tokens=list(round_new),
             target_forward_input_len=len(target_input),
+            target_forward_calls=target.forward_count - prev_target_calls,
+            draft_forward_calls=draft.forward_count - prev_draft_calls,
+            draft_cache_len_after=draft.cache_len,
+            target_cache_len_after=target.cache_len,
         ))
+        prev_target_calls = target.forward_count
+        prev_draft_calls = draft.forward_count
 
     return DecodeResult(
         prompt_ids=list(prompt_ids),

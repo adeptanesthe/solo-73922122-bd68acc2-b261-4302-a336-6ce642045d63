@@ -15,11 +15,19 @@
 
 from __future__ import annotations
 
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from . import tokenizer
+
+# 固定线程数，保证数值归约顺序稳定：不同机器的默认线程数会改变 float32
+# 归约顺序，可能翻转接近平局的 argmax，使预设的拒绝/整块接受判定漂移。
+# 注意：这只会影响"展示哪条路径"，不影响推测解码与基线的逐 token 一致性
+# （两条路径使用同一线程配置）。
+torch.set_num_threads(int(os.environ.get("SPEC_DECODE_THREADS", "1")))
 
 # 固定随机种子，保证每次构建的权重完全一致（无需下载模型文件）
 _WEIGHT_SEED = 20261116

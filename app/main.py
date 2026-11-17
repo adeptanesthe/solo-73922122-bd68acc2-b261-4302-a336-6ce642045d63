@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from dataclasses import asdict
 
 from fastapi import FastAPI
@@ -18,35 +19,15 @@ app = FastAPI(title="Speculative Decoding Verifier")
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "static")
 
-# 候选提示词（纯 ASCII，固定词表全部可编码）；启动时扫描出
-# 分别触发"拒绝"和"整块接受"的两条预设。
-_CANDIDATE_PROMPTS = [
-    "the quick brown fox jumps over the lazy dog while ",
-    "hello world, this is a tiny transformer demo of ",
-    "speculative decoding uses a small draft model to ",
-    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ",
-    "in the beginning there was only silence and then ",
-    "print(\"sum =\")  # ",
-    "the answer to life the universe and everything is ",
-    "one two three four five six seven eight nine ten ",
-    "python java rust go c plus plus ruby swift scala ",
-    "a stitch in time saves nine, and early birds get ",
-    "the rain in spain stays mainly on the plain while ",
-    "to be or not to be that is the question whether ",
-    "x = 1\ny = 2\nz = x + y\nprint(z)\n# output is ",
-    "all work and no play makes jack a dull boy, so ",
-    "once upon a time in a small village lived an old ",
-    "the capital of france is paris and the capital of ",
-    "0 1 1 2 3 5 8 13 21 34 55 89 144 233 next number ",
-    "she sells sea shells by the sea shore, the shells ",
-    "machine learning models can be compressed with ",
-    "alpha beta gamma delta epsilon zeta eta theta iota ",
-]
+# 模型是进程内单例，KV 缓存与前向计数是请求级可变状态；同步路由在
+# 线程池中并发执行，必须串行化整次解码，否则请求之间会互相污染缓存。
+_DECODE_LOCK = threading.Lock()
 
 # 固定预设：经实测与测试套件锁定，分别稳定触发"拒绝"与"整块接受"。
-# 拒绝预设：草稿与目标在该上下文上分歧，首轮接受后持续被拒，
-# 用于验证"被拒草稿不会污染后续生成"；
-# 整块接受预设：每轮草稿 token 全部通过，展示目标前向节省的上限。
+# 拒绝预设：k=3 第 2 轮为"部分接受后拒绝"（草稿 [空格,K,K]，只接受 1 个），
+# 用于验证被拒 token 不会残留、下一轮草稿仍基于完整确认前缀；
+# k=4 第 2 轮全部被拒、第 3 轮即恢复整块接受。
+# 整块接受预设：k=4 时各轮草稿 token 全部通过，展示目标前向节省的上限。
 PRESET_REJECT = "python java rust go c plus plus ruby swift scala "
 PRESET_ALL_ACCEPTED = "the quick brown fox jumps over the lazy dog while "
 
@@ -115,7 +96,8 @@ def decode(req: DecodeRequest) -> JSONResponse:
             content={"error": "提示词编码后为空，请输入可打印 ASCII 字符。"},
         )
     draft, target = get_models()
-    result = compare(draft, target, prompt_ids, req.k, req.max_new)
+    with _DECODE_LOCK:
+        result = compare(draft, target, prompt_ids, req.k, req.max_new)
     return JSONResponse(_serialize(result, req.prompt))
 
 
