@@ -1,0 +1,7 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+# torch 官方惯用 `import torch.nn as nn`，忽略对应的别名风格规则
+ignore = ["PLR0402", "E501"]

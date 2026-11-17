@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>推测解码验证台 · Speculative Decoding Verifier</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #1a2129; --line: #2c3743;
+    --txt: #d8e0e8; --muted: #8a97a5; --accent: #4da3ff;
+    --ok: #3fb96b; --bad: #ff5c5c; --warn: #e0a13c;
+    --draft: #6b7a8d; --accept: #2f7d4f; --reject: #8a3a3a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--txt);
+    font-family: "SF Mono", "Menlo", "Consolas", monospace; font-size: 14px;
+  }
+  header { padding: 18px 28px; border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0 0 6px; font-size: 20px; }
+  header p { margin: 0; color: var(--muted); font-size: 12px; }
+  main { padding: 24px 28px; max-width: 1180px; margin: 0 auto; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 18px; margin-bottom: 20px;
+  }
+  label { display: block; color: var(--muted); margin-bottom: 6px; font-size: 12px; }
+  textarea, input[type=number] {
+    width: 100%; background: #0c1116; color: var(--txt);
+    border: 1px solid var(--line); border-radius: 6px; padding: 10px;
+    font-family: inherit; font-size: 14px;
+  }
+  textarea { min-height: 70px; resize: vertical; }
+  .row { display: flex; gap: 16px; flex-wrap: wrap; }
+  .row > div { flex: 1; min-width: 140px; }
+  button {
+    background: var(--accent); color: #08111c; border: 0; border-radius: 6px;
+    padding: 10px 22px; font-weight: 700; cursor: pointer; font-family: inherit;
+  }
+  button:hover { filter: brightness(1.1); }
+  button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  .presets { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+  .badge {
+    display: inline-block; padding: 3px 10px; border-radius: 20px;
+    font-size: 12px; font-weight: 700;
+  }
+  .badge.pass { background: rgba(63,185,107,.18); color: var(--ok); border: 1px solid var(--ok); }
+  .badge.fail { background: rgba(255,92,92,.18); color: var(--bad); border: 1px solid var(--bad); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 860px) { .grid2 { grid-template-columns: 1fr; } }
+  h3 { margin: 0 0 10px; font-size: 14px; color: var(--accent); }
+  .metric { display: flex; justify-content: space-between; padding: 4px 0; color: var(--muted); }
+  .metric b { color: var(--txt); }
+  .tokens { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+  .tok {
+    padding: 2px 6px; border-radius: 4px; background: #232d38;
+    border: 1px solid var(--line); white-space: pre; font-size: 13px;
+  }
+  .tok.eos { color: var(--warn); border-color: var(--warn); }
+  .tok.mismatch { background: rgba(255,92,92,.35); border-color: var(--bad); color: #ffd9d9; }
+  .out-text { margin-top: 10px; padding: 10px; background: #0c1116; border-radius: 6px; white-space: pre-wrap; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  .tag-reject { color: #ff9b9b; }
+  .tag-all_accepted { color: #89e0a6; }
+  .mini-tok { background: #232d38; border-radius: 3px; padding: 1px 4px; margin: 1px; display: inline-block; white-space: pre; }
+  .mini-tok.acc { background: var(--accept); }
+  .mini-tok.bad { background: var(--reject); }
+  .mismatch-note {
+    margin-top: 12px; padding: 10px 14px; border-radius: 8px;
+    background: rgba(255,92,92,.12); border: 1px solid var(--bad); color: #ffc4c4;
+  }
+  .hidden { display: none; }
+  .err { color: var(--bad); margin-top: 10px; }
+  .savings-big { font-size: 26px; font-weight: 800; color: var(--ok); }
+</style>
+</head>
+<body>
+<header>
+  <h1>推测解码验证台 <span style="color:var(--muted);font-weight:400;font-size:13px">Speculative Decoding · CPU 小模型 · 固定权重</span></h1>
+  <p>目标模型每轮一次前向整块核验草稿；两模型复用 KV 缓存不重算前缀。推测结果必须与无缓存逐 token 贪心基线逐 token 完全一致，平局取词表序号小者。</p>
+</header>
+<main>
+  <section class="panel">
+    <label for="prompt">输入提示词（可打印 ASCII；词表 98 个固定 token，无需下载）</label>
+    <textarea id="prompt"></textarea>
+    <div class="presets">
+      <button class="ghost" id="presetReject" type="button">载入「拒绝」预设</button>
+      <button class="ghost" id="presetAccept" type="button">载入「整块接受」预设</button>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <div>
+        <label for="k">每轮草稿 token 数 k（1～4）</label>
+        <input type="number" id="k" min="1" max="4" value="3" />
+      </div>
+      <div>
+        <label for="maxNew">最多新 token 数（1～32）</label>
+        <input type="number" id="maxNew" min="1" max="32" value="32" />
+      </div>
+      <div style="display:flex;align-items:flex-end">
+        <button id="run">运行对照</button>
+      </div>
+    </div>
+    <div class="err hidden" id="err"></div>
+  </section>
+
+  <section id="result" class="hidden">
+    <section class="panel">
+      <span id="statusBadge" class="badge pass">PASS</span>
+      <span style="color:var(--muted);margin-left:10px" id="statusText"></span>
+      <div id="mismatchNote" class="mismatch-note hidden"></div>
+    </section>
+
+    <section class="panel">
+      <h3>目标模型前向次数对照（核心收益）</h3>
+      <div class="grid2">
+        <div>
+          <div class="metric"><span>无缓存贪心基线</span><b id="baseFwd">-</b></div>
+          <div class="metric"><span>推测解码（每轮 1 次）</span><b id="specFwd">-</b></div>
+          <div class="metric"><span>节省的目标前向</span><b id="savedFwd">-</b></div>
+        </div>
+        <div style="text-align:center">
+          <div class="savings-big" id="savingsPct">-</div>
+          <div style="color:var(--muted)">目标前向减少比例</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="grid2">
+      <div class="panel">
+        <h3>① 无缓存逐 token 贪心基线</h3>
+        <div class="metric"><span>目标前向次数</span><b id="bFwd2">-</b></div>
+        <div class="metric"><span>EOS 截断</span><b id="bEos">-</b></div>
+        <div class="tokens" id="bTokens"></div>
+        <div class="out-text" id="bText"></div>
+      </div>
+      <div class="panel">
+        <h3>② 推测解码（KV 缓存）</h3>
+        <div class="metric"><span>目标前向次数</span><b id="sFwd2">-</b></div>
+        <div class="metric"><span>草稿前向次数</span><b id="dFwd2">-</b></div>
+        <div class="metric"><span>EOS 截断</span><b id="sEos">-</b></div>
+        <div class="tokens" id="sTokens"></div>
+        <div class="out-text" id="sText"></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h3>逐轮核验明细（接受数 / 拒绝 / 整块接受）</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>轮次</th><th>草稿块</th><th>目标预测</th><th>接受数</th>
+            <th>判定</th><th>本轮确认 token</th><th>目标前向输入长度</th>
+          </tr>
+        </thead>
+        <tbody id="roundBody"></tbody>
+      </table>
+    </section>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+function tokSpan(t, isMismatch) {
+  const span = document.createElement("span");
+  span.className = "tok" + (t.id === 2 ? " eos" : "") + (isMismatch ? " mismatch" : "");
+  span.textContent = t.text === " " ? "␠" : t.text;
+  span.title = "id=" + t.id;
+  return span;
+}
+
+function miniTok(text, id, cls) {
+  const s = document.createElement("span");
+  s.className = "mini-tok" + (cls ? " " + cls : "");
+  s.textContent = text === " " ? "␠" : text;
+  s.title = "id=" + id;
+  return s;
+}
+
+async function loadPresets() {
+  try {
+    const r = await fetch("/api/presets");
+    const p = await r.json();
+    if (p.reject) $("presetReject").onclick = () => { $("prompt").value = p.reject; };
+    else $("presetReject").disabled = true;
+    if (p.all_accepted) $("presetAccept").onclick = () => { $("prompt").value = p.all_accepted; };
+    else $("presetAccept").disabled = true;
+  } catch (e) { /* 预设仅为便利，失败不阻塞 */ }
+}
+
+$("run").onclick = async () => {
+  $("err").classList.add("hidden");
+  const body = {
+    prompt: $("prompt").value,
+    k: parseInt($("k").value, 10),
+    max_new: parseInt($("maxNew").value, 10),
+  };
+  let data;
+  try {
+    const r = await fetch("/api/decode", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body),
+    });
+    data = await r.json();
+    if (!r.ok) {
+      $("err").textContent = data.error || "请求失败";
+      $("err").classList.remove("hidden");
+      return;
+    }
+  } catch (e) {
+    $("err").textContent = String(e);
+    $("err").classList.remove("hidden");
+    return;
+  }
+  render(data);
+};
+
+function render(d) {
+  $("result").classList.remove("hidden");
+  const badge = $("statusBadge");
+  badge.textContent = d.status;
+  badge.className = "badge " + (d.match ? "pass" : "fail");
+  $("statusText").textContent = d.match
+    ? "两种方式输出完全一致（含长度、EOS 位置、平局取小 id）"
+    : "存在分歧，判定失败";
+
+  const note = $("mismatchNote");
+  if (d.match) {
+    note.classList.add("hidden");
+  } else {
+    note.classList.remove("hidden");
+    const idx = d.first_mismatch_index;
+    const bt = d.baseline.new_tokens[idx];
+    const st = d.speculative.new_tokens[idx];
+    note.innerHTML = "首处分歧位于新 token 第 <b>" + idx + "</b> 个："
+      + "基线=<b>" + (bt ? bt.text + "(id " + bt.id + ")" : "∅") + "</b>，"
+      + "推测=<b>" + (st ? st.text + "(id " + st.id + ")" : "∅") + "</b>";
+  }
+
+  $("baseFwd").textContent = d.savings.baseline_forwards;
+  $("specFwd").textContent = d.savings.spec_forwards;
+  $("savedFwd").textContent = d.savings.saved;
+  const pct = d.savings.baseline_forwards
+    ? Math.round(100 * d.savings.saved / d.savings.baseline_forwards) : 0;
+  $("savingsPct").textContent = pct + "%";
+
+  $("bFwd2").textContent = d.baseline.target_forward_count;
+  $("bEos").textContent = d.baseline.stopped_by_eos ? "是" : "否";
+  $("bText").textContent = d.baseline.text;
+  $("bTokens").innerHTML = "";
+  d.baseline.new_tokens.forEach((t, i) =>
+    $("bTokens").appendChild(tokSpan(t, !d.match && i === d.first_mismatch_index)));
+
+  $("sFwd2").textContent = d.speculative.target_forward_count;
+  $("dFwd2").textContent = d.speculative.draft_forward_count;
+  $("sEos").textContent = d.speculative.stopped_by_eos ? "是" : "否";
+  $("sText").textContent = d.speculative.text;
+  $("sTokens").innerHTML = "";
+  d.speculative.new_tokens.forEach((t, i) =>
+    $("sTokens").appendChild(tokSpan(t, !d.match && i === d.first_mismatch_index)));
+
+  const body = $("roundBody");
+  body.innerHTML = "";
+  d.speculative.rounds.forEach((rd) => {
+    const tr = document.createElement("tr");
+    const cells = [
+      () => document.createTextNode("#" + rd.index),
+      () => {
+        const div = document.createElement("div");
+        rd.draft_tokens_view.forEach((t, i) =>
+          div.appendChild(miniTok(t.text, t.id, i < rd.accepted ? "acc" : "bad")));
+        return div;
+      },
+      () => {
+        const div = document.createElement("div");
+        rd.target_predictions_view.forEach((t) =>
+          div.appendChild(miniTok(t.text, t.id)));
+        return div;
+      },
+      () => document.createTextNode(rd.accepted + " / " + rd.draft_tokens.length),
+      () => {
+        const s = document.createElement("span");
+        s.className = "tag-" + rd.decision;
+        s.textContent = rd.decision === "reject" ? "拒绝" : "整块接受";
+        return s;
+      },
+      () => {
+        const div = document.createElement("div");
+        rd.target_tokens_view.forEach((t) => div.appendChild(miniTok(t.text, t.id)));
+        return div;
+      },
+      () => document.createTextNode(rd.target_forward_input_len),
+    ];
+    cells.forEach((make) => { const td = document.createElement("td"); td.appendChild(make()); tr.appendChild(td); });
+    body.appendChild(tr);
+  });
+}
+
+loadPresets();
+</script>
+</body>
+</html>

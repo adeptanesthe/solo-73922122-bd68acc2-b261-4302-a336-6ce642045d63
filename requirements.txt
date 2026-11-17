@@ -1,0 +1,4 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+# CPU 版 PyTorch 在 Dockerfile 中通过 pytorch 官方 CPU index 安装
